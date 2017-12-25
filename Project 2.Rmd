@@ -1,0 +1,420 @@
+---
+title: "Data 607 Project 2"
+author: "Peter Goodridge"
+date: "October 8, 2017"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+##Objectives
+
+*Transform and tidy 3 datasets*
+*Perform Analysis on said datasets*
+
+
+##Dataset 1 Commercial Paper
+
+Here we have some rate history on commercial paper, a short term debt instrument.  Our goal is to create a table that can summarize it by various dimensions, while keeping some of the metadata present in the csv file
+
+
+###Initialization
+```{r}
+library(readr)
+library(stringr)
+library(tidyverse)
+library(lubridate)
+library(pander)
+```
+
+
+###Read in and transpose data
+
+```{r message = FALSE}
+rates <- read_csv("https://raw.githubusercontent.com/TheFedExpress/DATA607/master/rates.csv")
+meta <- read_csv("https://raw.githubusercontent.com/TheFedExpress/DATA607/master/rates.csv", n_max = 4)
+
+rates <- rates [6:(nrow(rates)), ]
+cols <-ncol(meta)
+
+meta_t <-  meta %>% 
+  gather( 'col', 'desc', 2:25) %>% 
+  spread('Series Description', 'desc')
+# This sets up a joining the metadata to the actual data
+rates_t <- rates %>% gather('col', 'rate', 2:25)
+colnames(rates_t) <- unlist(str_extract_all(unlist(str_replace(colnames(rates_t), ' ', '')), '[[:alpha:]]+'))
+#remove the spaces from columnames, rather than explictly renaming
+colnames(meta_t) <- unlist(str_extract_all(unlist(str_replace(colnames(meta_t), ' ', '')), '[[:alpha:]]+'))
+```
+
+###Mutate the data
+
+```{r}
+with_mult <- rates_t %>% 
+  inner_join(meta_t, by = "col") %>% 
+  select(
+    "UniqueIdentifier",
+    "SeriesDescription",
+    "col", 
+    "rate", 
+    "Multiplier"
+  ) %>%
+  mutate(
+    Multiplier = as.numeric(Multiplier), 
+    rate = as.numeric(rate),
+    rate = Multiplier*rate,
+    duration = str_extract(col, '^\\b[\\w-]+\\b'),
+    duration_num = str_extract(duration, '\\d+')
+  )
+# This would use the multiper correctly (it's 1 with this set) and begin creating the columns for grouping dimension
+#the word function could be used, but why not practice some regex
+
+with_mult$duration_num <- ifelse(is.na(with_mult$duration_num), 1, with_mult$duration_num)
+
+with_mult <- with_mult %>%
+  rename(trading_date = SeriesDescription, rate_desc = col) %>%
+  mutate(
+    duration_num = as.numeric(duration_num),
+    trading_date = as.Date(trading_date),
+    rating = str_extract(rate_desc, '\\s\\b[\\w-/]+\\b'),
+    type = word(rate_desc,3,3)
+  )
+#numeric duration for ordering on the graphs below
+
+with_mult <- with_mult %>% 
+  arrange(duration, rating, type, trading_date) %>%
+  group_by(duration, rating, type) %>%
+  mutate(
+      rate_change = rate - lag(rate),
+      percent_change = (rate- lag(rate))/lag(rate)
+  )
+# Change and percent change are very valuable in securities analysis
+```
+
+###Analysis
+
+```{r}
+with_mult[!is.na(with_mult$rate), ] %>% 
+  group_by(duration, trading_date) %>%
+  summarise(avg = mean(rate, NA.rm = TRUE)) %>%
+    ggplot() + geom_line(aes(x = trading_date, y = avg, group = "identity", color = duration)) +
+      facet_wrap(~duration) +
+      labs(y = "Interest Rate", x = "Date", title = "Interest Rate by Tenor") +
+      scale_x_date(date_breaks  = "6 months")
+```
+
+I haven't been keeping up with my financial news lately, but I'd say there may have been some rate hikes.  https://fred.stlouisfed.org/series/FEDFUNDS
+The commercial paper rate, as one would expect closely tracks the fed funds rate.  We see this more for the shorter maturities too.
+
+```{r}
+with_mult %>% 
+  filter(!is.na(rate)) %>%
+  group_by(duration, duration_num, type, trading_date) %>%
+  summarise(avg = mean(rate, NA.rm = TRUE)) %>%
+  ggplot() + geom_line(aes(x = trading_date, y = avg, group = "identity", color = duration)) +
+  facet_grid(duration_num~type) +
+  labs(y = "Interest Rate", x = "Date", title = "Interest Rate by Type and Tenor") +
+  scale_x_date(date_breaks  = "6 months")
+
+
+with_mult %>% 
+  filter(!is.na(rate)) %>%
+  group_by(duration_num,duration, type, trading_date) %>%
+  summarise(avg = mean(percent_change, NA.rm = TRUE)) %>%
+  ggplot() + geom_line(aes(x = trading_date, y = avg, group = "identity", color = duration)) +
+  facet_grid(duration_num~type) +
+  labs(y = "Percent Change", x = "Date", title = "Percentage Change by Type and Tenor") +
+  scale_x_date(date_breaks  = "6 months")
+risk <- with_mult %>% 
+  filter(!is.na(rate)) %>%
+  group_by(duration_num, duration, type, rating) %>%
+  summarise(Stdev = sqrt(var(rate)))
+pander(as.data.frame(risk))
+```
+
+The breaks in the lines likely indicate that these types are less liquid.  Through every type, we see the overnight as almost a stepwise function.  The standard deviation of returns doesn't yield what I expected, which would be for the longer maturies to be riskier.  They should have higher interest rate risk because more is unknown about future rates.  Perhaps a different risk measure would have been better.
+
+
+##Dataset 2 Accidents
+
+Here we have some accident data in a fairly well structured form.  I believe this can be made into two datasets, one creating a relation between every accident and every vehicle involved, and the original dataset.  That gives you an additional level of detail.
+
+###Create the vehicles dataset
+
+Here is where we take the vehicle information from the full dataset to be separated out.  Some transposing will be required here.  The assumption is that contributing_factor_vehicle_n matches up to vehicle_type_coden
+
+```{r}
+accidents_full <- read_csv("https://raw.githubusercontent.com/TheFedExpress/DATA607/master/accidents.csv")
+vehicles_start <- accidents_full %>% 
+              select(
+                c(contributing_factor_vehicle_1:contributing_factor_vehicle_5, 
+                vehicle_type_code1: vehicle_type_code_5,
+                unique_key
+              ))
+vehicles_t <- vehicles_start %>% 
+  gather(
+    'vehicle_num', 
+    'value', 
+    c(contributing_factor_vehicle_1:contributing_factor_vehicle_5, vehicle_type_code1:vehicle_type_code_5)
+  )
+#this will make 10 rows per 1 original row.
+pander(head(as.data.frame(vehicles_t),10))
+vehicles_t <- vehicles_t %>% 
+  mutate(
+    type = str_extract(vehicle_num, '^[[:alpha:]]+_[[:alpha:]]+'),
+    vehicle_num = str_extract(vehicle_num, '\\d+')
+  ) %>%
+  arrange(unique_key, vehicle_num, type) %>%
+  spread( key = type, value = value)
+#This creats a vehicle num and a type column(contributing factor vs vehicle type), which sets up the spread function
+vehicles_t$contributing_factor <- ifelse(vehicles_t$contributing_factor == "Unspecified", NA, vehicles_t$contributing_factor)
+
+vehicles <- vehicles_t %>% 
+  filter(vehicle_num == 1 | !(is.na(contributing_factor) & is.na(vehicle_type)))
+#We want to keep at least the first vehicle and anything else where both values are not NA
+head(vehicles_t, 10)
+
+accidents <- accidents_full %>% 
+  select (
+     -c(contributing_factor_vehicle_1:contributing_factor_vehicle_5, 
+      vehicle_type_code1: vehicle_type_code_5)
+    )
+#The columns we used can be removed from the accidents dataset
+head(accidents)
+```
+
+###Analysis of vehicles data
+
+```{r}
+vehicles[!is.na(vehicles$vehicle_type),] %>% 
+  group_by(vehicle_type) %>% 
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  ggplot() + geom_bar(aes(x = vehicle_type, y = count, fill = vehicle_type), stat = 'Identity') +
+    coord_flip() +
+    labs(y = "Accidents", x = "Vehicle Type", title = "Accidents by Vehicle Type")
+    
+vehicles[!is.na(vehicles$contributing_factor),] %>% 
+  group_by(contributing_factor) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>%
+  filter(min_rank(desc(count)) <= 10)
+vehicles[!is.na(vehicles$vehicle_type),] %>% 
+  filter(!is.na(contributing_factor)) %>%
+  group_by(vehicle_type, contributing_factor) %>% 
+  summarise(count = n()) %>% 
+  arrange(desc(count)) %>%
+  filter(min_rank(desc(count)) <= 10)
+```
+
+This is fine, but it would be nice if we knew relative driving times of these vehicles.  This is the actuarial concept known as exposures.
+
+
+###Add has_suv flag
+
+SUVs are a really popular vehicle type that seems safe.  With our new data model, we can find out if they are safer.  This will add a flag for any accident involving an SUV
+
+```{r}
+suv_ids <- vehicles %>% 
+  filter(vehicle_type == "SPORT UTILITY / STATION WAGON") %>%
+  distinct(unique_key)
+
+with_suv <- accidents %>% 
+  semi_join(suv_ids, by = "unique_key") %>% mutate(has_suv = 1)
+  no_suv <- accidents %>% 
+    anti_join(suv_ids, by = "unique_key") %>% 
+    mutate(has_suv = 0)
+
+accidents_new <- dplyr::union(with_suv, no_suv)
+accidents_new <- accidents_new %>%
+    mutate( 
+      hour = hour(time)
+    )
+```
+
+###Analysis of accidents dataset
+```{r}
+select(accidents, borough) %>%
+  distinct()
+sum(is.na(accidents_new$borough))
+
+
+accidents_new[!is.na(accidents_new$borough),] %>%
+  ggplot(aes(x = borough, fill = borough)) + geom_bar()
+
+accidents_new %>%
+  ggplot() + geom_bar(aes(x = hour), fill = "darkgreen")
+
+accidents_new %>% 
+  group_by(has_suv) %>%
+  summarise(
+    ratio_killed = sum(number_of_persons_killed)/n(),
+    ratio_injured = sum(number_of_persons_injured)/n()
+  )
+```
+
+It looks like SUVs might be slightly safer.  As with the analysis above, exposures would be really nice here.  How much more congested is the Bronx than Staten Island?  There are more accidents at peak times and midnight, but are there more accidents per exposure?  The uptick at midnight is interesting.  As a Bostoner, I would say it's when bars close, but New York is the city that never sleeps!
+
+
+##Dataset 3 Sharks
+
+This dataset is less structred than the previous two and a nice change of pace.  It has a couple freeform text fields that must be parsed.
+
+###Parse out date and time fields
+
+The data field is a character and has some irregularities, to maximize the possiblity of using times a dimensions, we break it up part by part
+
+```{r}
+sharks <- read_csv("https://raw.githubusercontent.com/TheFedExpress/DATA607/master/sharks.csv")
+sharks$`Case Number` <- ifelse(sharks$`Case Number` == '0', NA, sharks$`Case Number`)
+sharks <- sharks[is.na(sharks$`Case Number`) == 0, 1:22]
+
+sharks_new <- sharks %>% 
+  mutate(
+    Date = str_extract(Date, '\\d*?[-]*?([[:alpha:]]{3})?[-]*?\\d{4}'),
+    year = as.numeric(str_extract(Date, '\\d{4}')), 
+    month = str_extract(Date, '[[:alpha:]]{3}'), 
+    month_int = match(month, month.abb),
+    day = as.numeric(str_extract(Date, '\\d{2}')),
+    Time = tolower(str_replace_all(Time,'\\s', ''))
+  )
+
+sharks_new$Time <-  ifelse(str_detect(sharks_new$Time,'morning') == 1, '8h00', sharks_new$Time)
+sharks_new$Time <-  ifelse(str_detect(sharks_new$Time,'night') == 1, '18h00', sharks_new$Time)
+sharks_new$Time <-  ifelse(str_detect(sharks_new$Time,'afternoon') == 1, '13h00', sharks_new$Time)
+#Something is (usually) better than nothing.  This will create spikes around those hours, but I believe it's worth it
+sharks_new <- sharks_new %>% mutate(Time = str_extract(Time, '\\d{1,2}h\\d{2}'))
+sharks_new <- sharks_new %>% mutate(species_temp = tolower(str_replace_all(Species, '[^[:alpha:] ]', ''))) %>%
+  mutate(
+    type = str_extract(species_temp, '[[:alpha:]]+ shark'), #assume the word before shark is the species
+    hour = as.numeric(word(Time, 1, 1, sep = fixed("h"))),
+    minute = as.numeric(word(Time, 2, 2 ,sep = fixed("h"))),
+    datetime = make_datetime(year, 
+                             ifelse(is.na(month_int) == TRUE,1,month_int), 
+                             ifelse(is.na(hour) == TRUE,1,month_int), 
+                             ifelse(is.na(minute) == TRUE,1,month_int)
+      )
+    )
+
+```
+
+
+###Parse out the species field
+
+Included in the species field are the actual species, height, and weight of the sharks.  There is a lot of info we can get by doing this.  We also standardize the area and activity fields
+
+```{r}
+sharks_new <- sharks_new %>% 
+  mutate(
+    species_temp = tolower(str_replace_all(Species, "'", 'f')), #removing characters makes this so much easier
+    species_temp = tolower(str_replace_all(species_temp, '[^[:alnum:]\\.]', '')),
+    length_temp = str_extract(species_temp,  '\\d+(\\.\\d+)?[a-z](to\\d+(\\.\\d+)?[a-z])?'), #optionals to allow for decimals and ranges
+    length_lower = str_extract(length_temp, '\\d+(\\.\\d+)?[a-z]'),
+    length_upper_temp =  str_sub(length_temp, str_locate(length_temp, 'to')[,2] + 1),
+    length_upper = str_extract(length_upper_temp, '\\d+(\\.\\d+)?[a-z]')
+  )
+
+convert <- function(x){
+  if (!is.na(str_extract(x, 'm'))){
+    l = as.numeric(str_extract(x,'\\d+(\\.\\d+)?'))
+    return(l)
+  }else if (!is.na(str_extract(x, 'f'))){
+    l = .3048*as.numeric(str_extract(x,'\\d+(\\.\\d+)?'))
+    return(l)
+  }else if(!is.na(str_extract(x, 'i'))){ 
+    l = .0254*as.numeric(str_extract(x,'\\d+(\\.\\d+)?'))
+  return(l)
+  }
+  else{
+    return(NA)
+  }
+}
+
+sharks_new$lower_meters <- unlist(sapply(sharks_new$length_lower, convert))
+sharks_new$upper_meters <- unlist(sapply(sharks_new$length_upper, convert))
+sharks_new$length_meters <- rowMeans(cbind(sharks_new$lower_meters, sharks_new$upper_meters), na.rm = TRUE)
+
+#almost the same as above, but for weight measurements
+sharks_new <- sharks_new %>% 
+  mutate(
+    species_temp = tolower(str_replace_all(Species, "'", 'f')),
+    species_temp = tolower(str_replace_all(species_temp, '[^[:alnum:]]', '')),
+    weight_temp = str_extract(species_temp,  '\\d+(\\.\\d+)?[kl]{1}[a-z]+(to\\d+(\\.\\d+)?[a-z])?'), 
+    weight_lower = str_extract(weight_temp, '\\d+(\\.\\d+)?[a-z]'),
+    weight_upper_temp =  str_sub(weight_temp, str_locate(weight_temp, 'to')[,2] + 1),
+    weight_upper = str_extract(weight_upper_temp, '\\d+(\\.\\d+)?[a-z]')
+  )
+
+convert <- function(x){
+  if (!is.na(str_extract(x, 'k'))){
+    l = as.numeric(str_extract(x,'\\d+(\\.\\d+)?'))
+    return(l)
+  }else if (!is.na(str_extract(x, 'l'))){
+    l = .453592*as.numeric(str_extract(x,'\\d+(\\.\\d+)?'))
+    return(l)
+  }else{
+    return(NA)
+  }
+}
+sharks_new$lower_kg <- unlist(sapply(sharks_new$weight_lower, convert))
+sharks_new$upper_kg <- unlist(sapply(sharks_new$weight_upper, convert))
+sharks_new$weight_kg <- rowMeans(cbind(sharks_new$upper_kg, sharks_new$lower_kg), na.rm = TRUE)
+sharks_new <- sharks_new %>% 
+  mutate(
+    verb = tolower(str_extract(Activity,'[[:alpha:]]+ing')), #assume every activity ends in "ing"
+    area_stand = tolower(str_extract(Area, '[[:alpha:]-\\. ]+'))
+  )
+sharks_new %>% 
+  select(Species, type, length_meters, weight_kg) %>%
+  head()
+
+sharks_new$length_meters <- ifelse(sharks_new$length_meters > 20, NA, sharks_new$length_meters)
+#the method we used failed when measurements were in mm.  Rather than write some spaghetti code to deal with it, we remove those observations.
+sharks_new <- rename(sharks_new, fatal = `Fatal (Y/N)`)
+sharks_new <- sharks_new %>% mutate(fatal = tolower(fatal)) %>%
+  mutate(fatal = str_extract(fatal, '[yn]'))
+
+
+sharks_final <- sharks_new %>%
+  select(
+    -c(Year, length_temp:length_upper, weight_temp:weight_upper, species_temp) #we don't need these anymore
+  )
+sharks_final$weight_kg <- ifelse(is.nan(sharks_final$weight_kg), NA, sharks_final$weight_kg)
+sharks_final$length_meters <- ifelse(is.nan(sharks_final$length_meters), NA, sharks_final$length_meters)
+head(sharks_final,10)
+```
+
+
+###Analysis
+
+We look to compare the size of sharks in fatal attacks vs those in nonfatal attacks, find the safest areas, and the safest activities
+
+```{r}
+sharks_new[!is.na(sharks_new$fatal),] %>%
+  ggplot() + geom_boxplot(mapping = aes(x = fatal, y = length_meters, color = fatal)) +
+    labs(title = "Comparison of Shark Sizes in Fatal Attacks", y = "Length (m)", x = "Was Fatal")
+
+sharks_new %>%
+  group_by(area_stand) %>%
+  summarize(attacks = n()) %>%
+  arrange(desc(attacks)) %>%
+  filter(min_rank(desc(attacks)) <= 15 & !is.na(area_stand)) %>%
+  ggplot() + geom_bar(mapping= aes(x = area_stand, y = attacks, fill = area_stand), stat = "Identity") +
+    coord_flip() + labs(x = "Area", title = "Top 15 Dangerous Areas")
+
+sharks_new %>%
+  group_by(verb) %>%
+  summarize(attacks = n()) %>%
+  arrange(desc(attacks)) %>%
+  filter(min_rank(desc(attacks)) <= 15 & !is.na(verb)) %>%
+  ggplot() + geom_bar(mapping= aes(x = verb, y = attacks, fill = verb), stat = "Identity") +
+    coord_flip() + labs(x = "Activity", title = "Top 15 Dangerous Activities")
+```
+
+It looks as though bigger sharks are deadlier!  I am also not swimming in Florida anytime soon!

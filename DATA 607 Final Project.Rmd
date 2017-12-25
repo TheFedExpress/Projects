@@ -1,0 +1,464 @@
+---
+title: "Twitter and Stock Prices"
+author: "Peter Goodridge"
+date: "December 9, 2017"
+output: 
+  html_document:
+    toc: yes
+    toc_float: yes
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F)
+```
+
+###Introduction
+
+As long as there has been a stock market, there have been people trying to predict the direction of prices.  "Efficient Market Hypothesis" is a theory that asserts that it is impossible to beat the market.  At the core of EMH is the assumption that all investors have the same publicly known information regarding companies, so it is impossible to get an edge on the competition.  Insider information is one way to break this parity, and that is part of why it is illegal.  I will look to Twitter to gain my own "inside information" by measuring the pulse of the Twitterverse.
+
+###Acquiring the data
+
+Two main sources were used to acquire data, the free twitter API, and the free Alpha Vantage stock quote API.  Both free APIs limited the timeframe from which you could pull data, so a daily process to load new data had to be put in place.  
+Additionally, The twitter dataset would become quite large, as is usually the case with text data, so I needed a solution that would allow for fast uploads and downloads.  I decided on Mongo Atlas, which proved both convenient and robust.  I could execute queries on the data stored in the cloud, and pull down only what I needed, but also had access to the entire dataset when necessary.
+
+
+<b>*Twitter*</b> <br>
+
+I used one search query for each company to choose the tweets I would be loading.  Companies with popular consumer products, like Microsoft and Netflix, returned too many tweets with a simple search of their name, so I had to use a hashtag.  With every refresh, I queried Mongo Atlas to return the ID of the most recent tweet for each company.  The mongolite package documentation has nothing about aggregate queries, so I had to turn to the MongoDB official documentation.
+
+```{r eval= F}
+setup_twitter_oauth(api_key, api_secret, token, token_secret)
+
+queries <- c('#tesla', '#microsoft', 'pfizer', 'general electric', '#netflix', 'citrix', '#starbucks')
+
+mongo<- mongolite::mongo(collection = "tweets", db = "stockTweets", url = url)
+
+
+mongo_query <- '[{"$group":{"_id": "$company", "max_id" : {"$max": "$id"}}}]' #aggregate query
+maxes <- mongo$aggregate(mongo_query)
+
+new_tweets <- mapply(searchTwitteR, searchString = maxes$`_id`, sinceID = maxes$max_id, n = 50000, lang = "en")
+
+
+df_exist <- F
+for (i in 1:length(queries)){
+  if (!is_empty(new_tweets[[i]])){
+    if(df_exist == F){ 
+      df <- twListToDF(new_tweets[[i]]) %>%
+        mutate(
+          company = queries[i]
+        )
+      df_exist <- T
+    }else{
+      temp <- twListToDF(new_tweets[[i]]) %>%
+        mutate(
+          company = queries[i]
+        )
+      df <- rbind(df, temp)
+    }
+  }
+}
+df$text <-stri_encode(df$text, "", "UTF-8" )
+mongo$insert(df)
+```
+
+<b>*Alpha Vantage*</b> <br>
+
+Alpha Vantage was the only site I could find that offered free intraday historical quotes.  Thirty minutes seemed like the correct granularity for the analysis I would be conducting later.
+
+```{r eval = F}
+mongo<- mongolite::mongo(collection = "quotes", db = "stockTweets", url = url)
+mongo_query <- '[{"$group":{"_id": "$company", "max_time" : {"$max": "$time"}}}]'
+maxes <- mongo$aggregate(mongo_query)
+
+
+tickers <- c("nflx", "msft", "tsla", "pfe", "ge", "ctxs", "sbux")
+prices_base <- data.frame (open = double(), close = double(), character (), company = character (), stringsAsFactors = F)
+urls <- str_c("https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=" , tickers, "&interval=30min&outputsize=full&apikey=", vantage_key)
+get_prices <- function (index){
+  open <- my_list[[index]][[1]]
+  close <- my_list[[index]][[4]]
+  c(open =open, close = close)
+}
+for (i in 1:length(urls)){
+  response <- fromJSON(urls[i])
+  my_list <- response$`Time Series (30min)`
+  time <- names(my_list)
+  vec <- 1:length(my_list)
+  prices <- sapply(vec, get_prices)
+  company <- rep(tickers[i], length(vec))
+  prices_df <- data.frame(t(prices), time, company, stringsAsFactors = F)
+  prices_base <- rbind(prices_base, prices_df)
+}
+inserts <- prices_base %>%
+  inner_join(maxes, by = c("company" = "_id")) %>%
+  filter(time > max_time) %>%
+  select(-max_time)
+  
+mongo$insert(inserts)
+all_quotes <- mongo$find ()
+```
+
+###Sentiment Analysis
+
+Alpha Vantage was the only site I could find that offered free intraday historical quotes.  Thirty minutes seemed like the correct granularity for the analysis I would be conducting later.
+
+Many (all?) tweets are encoded with the opinion of the author.  The two questions are then: 
+1.What is the object of the opinion?
+2.What is the opinion?
+I will make the simplifying assumption, for now, I have answered the first question with the search API.  It was the company I searched for.  There are several ways to answer the second question, but I first tried knowledge based sentiment analysis with the AFINN lexicon.  AFINN uses a hand coded set of words that were given ratings from -5 to 5 based on tone.The more positive the word is, the higher the value of the rating. To determine the sentiment of the opinion in question, you sum the total score of the words that make up that opinion.  In my case, I summed the score of each tweet.  I made two modifications.  First, I added some words to the vocabulary specific to stocks and Twitter.  Then, I multiplied the score by negative 1 if a word like not preceded it.  For example, "not good" would have a negative score.
+
+I was originally unsure how to handle retweets.  They shouldn't be removed because it upweights tweets with higher influence, but counting their full value could give certain tweets too much influence.  I settled on half the score for retweets, though that was somewhat arbitrary and subject to change.
+
+
+```{r}
+library(jsonlite)
+library(RCurl)
+library(twitteR)
+library(tidytext)
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(rvest)
+library(RCurl)
+library(mongolite)
+library(stringi)
+library(tm)
+library(RTextTools)
+library(pander)
+
+
+url <- "mongodb://guest:data607@cluster0-shard-00-00-xa7nx.mongodb.net:27017,cluster0-shard-00-01-xa7nx.mongodb.net:27017,cluster0-shard-00-02-xa7nx.mongodb.net:27017/test?ssl=true&replicaSet=Cluster0-shard-0&authSource=admin"#guestuser with read only
+mongo_tweets<- mongolite::mongo(collection = "tweets", db = "stockTweets", url = url)
+mongo_quotes <- mongolite::mongo(collection = "quotes", db = "stockTweets", url = url)
+
+all_tweets <- mongo_tweets$find()
+all_quotes <- mongo_quotes$find()
+sentiment_dataset <- read_csv("https://raw.githubusercontent.com/TheFedExpress/Data/master/sentiment%20subset")
+
+tickers <- c("tsla", "msft", "pfe", "ge", "nflx", "ctxs", "sbux") #for joining quotes to tweets
+queries <- c('#tesla', '#microsoft', 'pfizer', 'general electric', '#netflix', 'citrix', '#starbucks')
+replace_it <- function(ticker){
+  for (i in 1:length(queries)){
+    if (ticker == tickers[i]){
+      return(queries[i])
+    }
+  }
+}
+all_quotes$company <- sapply(all_quotes$company, replace_it)
+all_quotes$time <- ymd_hms(all_quotes$time)
+all_quotes$open <- as.numeric(all_quotes$open)
+all_quotes$close <- as.numeric(all_quotes$close)
+
+no_sentiment <- c('shares')
+#customize the vocabulary
+sentiment <- c('downgrade', 'upgrade', 'fall', 'rise', 'bullish', 'bearish', 'bull', 'bear', 'ssmiley', 'ssadface')
+scores <- c(-4, 4, -2, 2, 4, -4, 4, -4, 3, -3)
+new_sentiment <- data.frame(word = sentiment, score = scores, stringsAsFactors = F)
+sentiment_words <- get_sentiments("afinn") %>%
+  filter(!(word %in% no_sentiment))%>%
+  dplyr::union(new_sentiment)
+
+clean_tweet <- all_tweets %>%
+  filter(isRetweet == "FALSE") %>%
+  mutate(#convert emoticons
+    clean_text = str_replace_all(text, 'http(s)?://[\\S]+', 'URL'),
+    clean_text = str_replace_all(clean_text, '@[\\S]+', 'USER'),
+    clean_text = tolower(clean_text),
+    clean_text = str_replace_all(clean_text, ':-\\)', ' ssmiley '),
+    clean_text = str_replace_all(clean_text, ':-\\(', 'ssadface '),
+    clean_text = str_replace_all(clean_text, '\\(:', ' sssmiley '),
+    clean_text = str_replace_all(clean_text, ':\\(', ' ssadface '),
+    clean_text = str_replace_all(clean_text, ':\\)', ' sssmiley '),
+    clean_text = str_replace_all(clean_text, '\\):', ' ssadface '),
+    clean_text = str_replace_all(clean_text, '\\):', ' ssadface '),
+    clean_text = str_replace_all(clean_text, ':-D', ' ssmiley '),
+    clean_text = str_replace_all(clean_text, ':\\[', ' ssadface '),
+    clean_text = str_replace_all(clean_text, '=\\)', ' ssmiley '),
+    clean_text = str_replace_all(clean_text, '=\\(', ' ssadface '),
+    clean_text = str_replace_all(clean_text, '[[:punct:]]', ''),
+    clean_text = str_replace_all(clean_text, '[^[:alpha:] .]', '')
+  )
+
+
+bigrams <- clean_tweet %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+
+negation_words <- c("not", "no", "never", "without", "didnt")
+
+tweets_sentiment_temp <- bigrams %>%
+  separate(bigram, sep = ' ', c("word1", "word2")) %>%
+  inner_join(sentiment_words, by = c("word2" = "word") ) %>%
+  mutate(bigram = str_c(word1, word2, sep = ' '))
+
+tweets_sentiment_temp$score <- ifelse(tweets_sentiment_temp$word1 %in% negation_words, tweets_sentiment_temp$score*-1, tweets_sentiment_temp$score)
+
+tweets_sentiment <- tweets_sentiment_temp %>%
+  mutate(
+    date = floor_date(created, "30 mins")
+  ) %>%
+  group_by(company, date) %>%
+  summarise(sentiment = sum(ifelse(isRetweet == "False", score, score * .5))) %>%#retweets only count for half
+  ungroup()
+
+tweets_sentiment %>% 
+    mutate (company = str_extract(company, "[[:alpha:] ]+")) %>%
+    ggplot() + geom_line(aes(x = date, y = sentiment, color = company)) + facet_wrap(~company)
+
+```
+
+There is fair amount of volatility within half hour time frames.  Spikes are also present, showing the influence of retweets.  
+
+
+```{r}
+top_words <- tweets_sentiment_temp %>%
+  group_by(word2) %>%
+  summarise(total_score = sum(score)) %>%
+  filter(min_rank(desc(total_score)) <= 15)
+top_words$type = "Positive Sentiment"
+  
+
+bottom_words <- tweets_sentiment_temp %>%
+  group_by(word2) %>%
+  summarise(total_score = sum(score)) %>%
+  filter(min_rank(total_score) <= 15)
+bottom_words$type = "Negative Sentiment"
+  
+rbind(top_words, bottom_words) %>%
+  ggplot() + geom_bar(aes(x = word2, y = total_score, fill = type), stat = "identity") +
+  coord_flip() + labs(title = "Top Sentiment From Tweets", x = "Word", y = "Total Score")
+```
+
+There don't seem to be any words that are clearly not classified correctly, though swears are possibly a problem.  Depending on the context, they can be either positive, negative, or neutral, and the split is more even than other words.
+
+###Test with labeled data
+
+I wanted to measure how well the AFINN method works on tweets, and was able to locate a hand labeled dataset.  This dataset won't completely proxy the performance on our company data, but it should provide a good baseline.  
+
+```{r}
+sentiment_clean <- sentiment_dataset %>%
+  mutate(
+    clean_text = str_replace_all(SentimentText, 'http(s)?://[\\S]+', 'URL'),
+    clean_text = str_replace_all(clean_text, '@[\\S]+', 'USER'),
+    clean_text = tolower(clean_text),
+    clean_text = str_replace_all(clean_text, ':-\\)', ' ssmiley '),
+    clean_text = str_replace_all(clean_text, ':-\\(', 'ssadface '),
+    clean_text = str_replace_all(clean_text, '\\(:', ' sssmiley '),
+    clean_text = str_replace_all(clean_text, ':\\(', ' ssadface '),
+    clean_text = str_replace_all(clean_text, ':\\)', ' sssmiley '),
+    clean_text = str_replace_all(clean_text, '\\):', ' ssadface '),
+    clean_text = str_replace_all(clean_text, '\\):', ' ssadface '),
+    clean_text = str_replace_all(clean_text, ':-D', ' ssmiley '),
+    clean_text = str_replace_all(clean_text, ':\\[', ' ssadface '),
+    clean_text = str_replace_all(clean_text, '=\\)', ' ssmiley '),
+    clean_text = str_replace_all(clean_text, '=\\(', ' ssadface '),
+    clean_text = str_replace_all(clean_text, '[[:punct:]]', ''),
+    clean_text = str_replace_all(clean_text, '[^[:alpha:] .]', '')
+  )
+
+bigrams_test <- sentiment_clean %>%
+  unnest_tokens(bigram, SentimentText, token = "ngrams", n = 2)
+
+
+sentiment_test_temp <- bigrams_test %>%
+  separate(bigram, sep = ' ', c("word1", "word2")) %>%
+  left_join(sentiment_words, by = c("word2" = "word") ) %>%
+  mutate(
+    bigram = str_c(word1, word2, sep = ' '),
+    score = ifelse(is.na(score), 0, score)
+    )
+    
+
+sentiment_test_temp$score <- ifelse(sentiment_test_temp$word1 %in% negation_words, sentiment_test_temp$score*-1, sentiment_test_temp$score)
+
+top_words <- sentiment_test_temp %>%
+  group_by(word2) %>%
+  summarise(total_score = sum(score)) %>%
+  filter(min_rank(desc(total_score)) <= 15)
+top_words$type = "Positive Sentiment"
+
+
+bottom_words <- sentiment_test_temp %>%
+  group_by(word2) %>%
+  summarise(total_score = sum(score)) %>%
+  filter(min_rank(total_score) <= 15)
+bottom_words$type = "Negative Sentiment"
+
+rbind(top_words, bottom_words) %>%
+  ggplot() + geom_bar(aes(x = word2, y = total_score, fill = type), stat = "identity") +
+  coord_flip() + labs(title = "Top Sentiment From Tweets", x = "Word", y = "Total Score")
+
+
+sentiment_test <- sentiment_test_temp %>%
+  group_by(ItemID, Sentiment) %>%
+  summarise(total_score = sum(score)) %>%
+  ungroup() %>%
+  mutate(predicted = ifelse(total_score <= 1, 0, 1),
+         correct = ifelse(predicted == Sentiment, 1,0))
+
+```
+
+Number positive: `r mean(sentiment_test$Sentiment)` <br>
+Accuracy: `r mean(sentiment_test$correct)`
+
+I was able to correctly label about two thirds of the sample tweets, which is better than random, given that the labels were evenly split.
+
+There was clearly more slang in the data from random tweets.  That is not surprising, and would possibly hurt the performance of a classifier if I wanted to use this as training data.
+
+###Adding in the price data
+
+```{r fig.width=8, fig.height= 10}
+hourly_sentiment <- tweets_sentiment %>%
+  inner_join(all_quotes, by = c("company" = "company", "date" = "time")) %>%
+  mutate (company = str_extract(company, "[[:alpha:] ]+")) %>%
+  group_by(company) %>%
+  mutate(
+    change =(close - lag(close))/lag(close),
+    change = ifelse(is.na(change), 0, change),
+    change_std = (change - mean(change))/sd(change),
+    sentiment_std = (sentiment - mean(sentiment))/sd(sentiment)
+  ) %>%
+  ungroup ()
+
+ggplot(hourly_sentiment) + geom_line(aes(x = date, y = change_std, color = "Price Change")) + 
+  geom_line(aes(x = date, y = sentiment_std, color = "Sentiment")) + facet_wrap(~company) +
+  labs(x = "Date", title = "Hourly Price Change/Sentiment Comparison")
+
+```
+
+```{r}
+ggplot(hourly_sentiment, aes(x = sentiment_std, y = change_std)) + geom_point() + geom_smooth(method = lm) +
+  labs(y = "Price Change Standardized", x = "Date", title = "Price Change Vs Sentiment")
+
+
+select(hourly_sentiment, sentiment_std, change_std) %>%
+  cor
+```
+
+Each company has a different number of tweets about it and a different baseline level of positivity.  A sentiment of 50 for Citrix could mean Twitter is exploding with praise for the company, while it would be commonplace for Netflix.  To account for this, I normalized the sentiment value.  I also normalized price changes for the plots and to remove possible bias from short term market fluctuations.  A different normalization of price would have to be performed for a longer-term study.
+
+When Grouped by the half-hour there is no relation between sentiment and price changes.  I next tried a longer time period and added and offset.  There might be delay between people's feelings and people's actions.
+
+
+```{r fig.width=8, fig.height= 11}
+daily_sentiment <- clean_tweet %>%
+  unnest_tokens(word, text) %>%
+  inner_join(sentiment_words, by = "word") %>%
+  mutate(
+    date = floor_date(created, "day"),
+    date = as.character(date),
+    date = ymd(date)
+  ) %>%
+  group_by(company, date) %>%
+  summarise(sentiment = sum(score)) %>%
+  ungroup() %>%
+  group_by(company) %>%
+  mutate(sentiment_std = (sentiment - mean(sentiment))/sd(sentiment)) %>%
+  ungroup ()
+
+daily_quotes <- all_quotes %>%
+  filter(hour(time) == 16) %>%
+  arrange(company, time) %>%
+  group_by(company) %>%
+  mutate(
+         change = (close - lag(close)), 
+         change = change/lag(close),
+         change = ifelse(is.na(change), 0, change),
+         change_std = (change - mean(change))/sd(change),
+         date = floor_date(time, "day") + 86400,
+         date = as.character(date),
+         date = ymd(date)
+      ) %>%
+  ungroup () %>%
+  select(company,date, change_std)
+
+daily_comp <- daily_sentiment %>%
+  inner_join(daily_quotes, by = c("company" = "company", "date" = "date")) %>%
+  mutate (company = str_extract(company, "[[:alpha:] ]+")) %>%
+  ungroup ()
+
+ggplot(daily_comp) + geom_line(aes(x = date, y = change_std, color = "Price Change")) + 
+  geom_line(aes(x = date, y = sentiment_std, color = "Sentiment")) + facet_wrap(~company) + 
+  labs(x = "Date", title = "Daily Lagged Change/Sentiment Comparison") +
+  scale_x_date(date_breaks  = "6 days")
+
+
+select(daily_comp, sentiment_std, change_std)  %>%
+  cor
+
+daily_comp %>%
+  filter(company %in% c("#starbucks", "citrix")) %>%
+  select(sentiment_std, change_std)  %>%
+  cor
+```
+
+```{r}
+model <- lm(change_std ~ sentiment_std, data = daily_comp)
+pander(summary(model))
+ggplot(daily_comp, aes(x = sentiment_std, y = change_std)) + geom_point() + geom_smooth(method = lm) +
+  labs(y = "Price Change Standardized", x = "Sentiment Standardized", title = "Price Change Vs Sentiment")
+```
+
+Here, with the one-day offset, we see a negative relationship between sentiment and returns.  Given the small sample size, I would attribute that to random noise or a source of bias.  More data will provide more options for relating price to sentiment, such as larger offsets and different normalizations.  Two weeks of quotes simply was not enough.
+
+###Sentiment Classifier
+
+I again turned my attention to correctly classifying the tweets.  Instead of using the AFINN method, I could use the labeled dataset to create a classifier.  This dataset will likely not generalize to the company tweets, as we saw with the differing vocabularies, but the concept could be tested.  If it proves effective, then hand coding and creating a classifier on the company data could be an option.  It should be noted that this method returns less detail than the previous one.  A binary value is returned, rather than a continuous variable, so it will have to be considerably better to warrant further exploration. 
+
+
+```{r}
+sentiment_features <- sentiment_clean
+  
+sentiment_features$clean_text <-  removeWords(sentiment_features$clean_text, stopwords())
+stop_words <- data.frame(stop_words)
+corpus <- Corpus(VectorSource(sentiment_features$clean_text))
+meta(corpus, "sentiment") <- sentiment_features$Sentiment
+
+
+td <- DocumentTermMatrix(corpus, control = list(weighting = weightTfIdf))
+
+
+labels <- sentiment_features$Sentiment
+len <- length(labels)
+
+container <- create_container(td, labels = labels, trainSize = 1:15000, testSize = 15001:len, virgin = F)
+
+svm_model <- train_model(container, "SVM")
+
+svm_test <- classify_model(container, svm_model)
+
+labels_out <- data.frame(actual_label = labels[15001:len], svm = svm_test[,1], stringsAsFactors = F)
+
+
+print_mets <- function (confusion){
+  recall <- confusion[4]/sum(confusion[3],confusion[4])
+  precision <- confusion[4] / sum(confusion[2], confusion[4])
+  accuracy <- sum(confusion[1], confusion[4]) / sum(confusion)
+  f <- 2*((precision*recall)/(precision + recall))
+  sprintf("Precision: %s Recall: %s Accuracy: %s F Measure: %s", round(precision, 5), round(recall,5),
+          round(accuracy, 5), round(f,5))
+}
+table_svm <- table(Predicted = labels_out$svm, Actual = labels_out$actual_label)
+print_mets(table_svm)
+```
+
+This is not the boost over the previous method that I was looking for.
+
+###Conclusion
+
+This exercise informed me of the steps that will need to be taken to make this a viable model.  The AFINN vocabulary will need to be tuned, possibly removing swears, as they are ambiguous.  More emoticons will also need to be added.  The offset and normalization methods for relating sentiment to price will need to be optimized.  Lastly, some of the tweets will have to be hand labeled, so that the accuracy of the sentiment scores can be tested.
+
+
+###References
+
+Text mining with R: a tidy approach by Julia Silge and David Robinson
+
+Sentiment Analysis of Twitter Data for Predicting Stock Market Movements by:
+Venkata Sasank 
+Pagolu Kamal 
+Nayan Reddy Challa 
+Ganapati Panda
+Babita Majhi
+https://arxiv.org/pdf/1610.09225.pdf

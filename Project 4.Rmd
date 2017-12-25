@@ -1,0 +1,218 @@
+---
+title: "Project 4"
+author: "Peter Goodridge"
+date: "November 5, 2017"
+output: 
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F)
+library(rvest)
+library(tm)
+library(RTextTools)
+library(tidytext)
+library(SnowballC)
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(pander)
+```
+
+###Introduction
+
+We live in tumultuous times when it comes to politics.  There is a lot of rhetoric coming from both sides on television, so it would be very beneficial to know what issues actually separate the parties.  Press releases from branches such as the department of the treasury should be more substantative than TV sound bites, so we will look there for data.  We will compare press releases made under the Obama administration to those made under the Trump administration.  Then we will see if a classifier can determine under which administration the document was created.
+
+###Scraping the data
+
+Each page of the query returns a table of links and dates.  We want the dates for metadata, so we store those first.  Each link is put in a vector, so that they can be looped through, and the article stored.
+```{r}
+base <- "https://www.treasury.gov/press-center/press-releases/Pages/default.aspx?dtend=2017-11-01&page="
+bodies <- list()
+dates <- list ()
+for (j in 1:2){ #this did go to 35, but for demonstration purposes we change it to 2
+  url <- str_c(base,j)
+  table <- html_session(url) %>%
+    html_nodes(xpath = '//td')
+
+  date_row <- table %>%
+    html_nodes('.firstcol') %>%
+    html_text
+  dates <- c(dates, date_row)
+
+  links <- html_session(url) %>%
+    html_nodes ('.datarow a') %>%
+    html_attr(name = 'href')
+  links <- str_c("https://www.treasury.gov",links)
+
+
+  for (i in 1:length(links)){
+    body <- html_session(links[i]) %>%
+      html_nodes(xpath = "//div[@class='content-bg']") %>% #this leaves some undesirable text, but it is removed later
+      html_text()
+    body <- paste(body, collapse  = ' ')
+    bodies <- c(bodies, body)
+    Sys.sleep(.5)
+  }
+}
+all_docs <- unlist(bodies) %>%
+  tolower()
+all_dates <- (unlist(dates)) %>%
+  mdy()
+
+data <- data.frame(date = all_dates, article = all_docs, stringsAsFactors = F) %>%
+  mutate(
+    administration = ifelse(date >= "2017-01-20", "Trump", "Obama"),
+    article = str_replace_all(article, "[[:punct:]]", " "),
+    article = str_replace_all(article, "[^[:alpha:] ]", "")
+  ) %>% 
+  arrange(article) #this will randomize the data for our testing set
+
+```
+
+```{r echo=F}
+data <- read_csv("C:\\Users\\pgood\\OneDrive\\Documents\\R\\docs.csv")
+```
+
+###Data Prep
+
+We remove non-letter characters, lowercase, and stem the data.  We also replace bigrams with a single token version.
+```{r}
+all_stops <- c(tm::stopwords("en"), "trump", "obama", "page", "contentwashington", letters)
+
+descs <- data$article
+data$wo_stops <-removeWords(tolower(descs), all_stops)
+
+article_words <- data %>%
+  select(
+    wo_stops, administration
+  ) %>%
+  unnest_tokens(word, wo_stops) %>%
+  mutate(word = wordStem(word)) %>%
+  group_by(administration, word) %>%
+  dplyr::summarize(count = n()) %>%
+  filter(count >= 10) %>%
+  mutate(prob = count/sum(count), tot = sum(count)) %>%
+  arrange(administration, desc(prob))
+
+article_words %>% 
+  filter(min_rank(desc(prob)) <= 15) %>%
+  arrange(administration, desc(prob)) %>%
+  ggplot() + geom_bar(aes(x = word, y = prob, fill = administration), stat = "identity") + facet_wrap(~administration) +
+  coord_flip () + labs(title = "Unigram Comparison")
+```
+
+North Korea, economic growth vs securities growth, and banks appear to be some of the major differences in issues.
+
+```{r}
+article_grams <- data %>%
+  select(
+    wo_stops, administration
+  ) %>%
+  unnest_tokens(word, wo_stops, token = "ngrams", n = 2) %>%
+  mutate(word = wordStem(word)) %>%
+  group_by(administration, word) %>%
+  dplyr::summarize(count = n()) %>%
+  filter(count >= 10) %>%
+  mutate(prob = count/sum(count)) %>%
+  arrange(administration, desc(prob))
+
+article_grams %>% 
+  filter(min_rank(desc(prob)) <= 15) %>%
+  arrange(administration, desc(prob)) %>%
+  ggplot() + geom_bar(aes(x = word, y = prob, fill = administration), stat = "identity") + facet_wrap(~administration) +
+  coord_flip () + labs(title = "Bigram Comparison")
+```
+
+The comparison of bigrams adds more clarity to the differences
+
+```{r}
+
+sub_grams <- article_grams %>%
+  ungroup () %>%
+  filter(prob >= .0005) %>%
+  mutate(new_word = str_replace_all(word, ' ', '_')) %>%
+  distinct(word, new_word)
+  
+data_new <- data
+
+
+for (i in 1:nrow(sub_grams)){
+  data_new <- data_new %>%
+    mutate(
+      wo_stops = str_replace_all(wo_stops, sub_grams$word[i], sub_grams$new_word[i])
+    ) 
+}
+data_new$wo_stops <- removeWords(data_new$wo_stops, "united_st")
+articles_final <- data_new  %>%
+    select(wo_stops, administration) %>%
+    rename(article = wo_stops)
+```
+
+
+###Run corpus through classifier
+
+Here, we create a tf-idf matrix and run that through some of the "usual suspects" for classifier models
+
+```{r}
+corpus <- Corpus(VectorSource(articles_final$article))
+
+meta(corpus, "administration") <- articles_final$administration
+corpus <- tm_map(corpus, stemDocument)
+table(articles_final$administration)
+
+td <- DocumentTermMatrix(corpus, control = list(weighting = weightTfIdf))
+labels <- data$administration
+len <- length(labels)
+
+container <- create_container(td, labels = labels, trainSize = 1:500, testSize = 501:len, virgin = F)
+
+svm_model <- train_model(container, "SVM") #changing the kernel to polynomial hurt performance
+tree_model <- train_model(container, "TREE", ntree = 500, nodesize = 5)
+maxent_model <- train_model(container, "MAXENT")
+
+svm_test <- classify_model(container, svm_model)
+tree_test <- classify_model(container, tree_model)
+maxent_test <- classify_model(container, maxent_model)
+
+labels_out <- data.frame(actual_label = labels[501:len], svm = svm_test[,1], tree = tree_test[,1], 
+                         maxent = maxent_test[,1], stringsAsFactors = F)
+
+```
+
+We create a function for calculating performance metrics and compare the models
+
+```{r}
+print_mets <- function (confusion){
+  recall <- confusion[4]/sum(confusion[3],confusion[4])
+  precision <- confusion[4] / sum(confusion[2], confusion[4])
+  accuracy <- sum(confusion[1], confusion[4]) / sum(confusion)
+  f <- 2*((precision*recall)/(precision + recall))
+  sprintf("Precision: %s Recall: %s Accuracy: %s F Measure: %s", round(precision, 5), round(recall,5),
+          round(accuracy, 5), round(f,5))
+}
+
+
+
+table_svm <- table(Predicted = labels_out$svm, Actual = labels_out$actual_label)
+pander(table_svm)
+print_mets(table_svm)
+
+table_tree <- table(Predicted = labels_out$tree, Actual = labels_out$actual_label)
+pander(table_tree)
+print_mets(table_tree)
+
+table_maxent <- table(Predicted = labels_out$maxent, Actual = labels_out$actual_label)
+pander(table_maxent)
+print_mets(table_maxent)
+```
+
+The best performance is clearly from the random forest model.
+
+###Conclusion
+
+There were some substantative differences in word distributions between press releases between the two administrations. As such, the classifier fared well, and was better than random when guessing either administration.  It is up to the reader to determine what to make of these differences in word choices.
+
