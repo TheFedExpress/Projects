@@ -1,0 +1,98 @@
+<html>
+	<head>
+	<script src="https://d14fo0winaifog.cloudfront.net/plotly-basic.js"></script>
+	<script>
+    		function loadVWAP()
+    		{
+			var tick = document.getElementById('ticker').value
+        		window.open('vwap?ticker=' + tick, '_blank')
+    		}
+    		function loadPrice()
+    		{
+			var tick = document.getElementById('ticker').value
+        		window.open('price?ticker=' + tick, '_blank')
+    		}
+    		function loadCash()
+    		{
+        		window.open('cash', '_blank')
+    		}
+    		function loadTPL()
+    		{
+        		window.open('tpl', '_blank')
+    		}
+	</script>
+	<style>
+	a {
+  	font: bold 11px Arial;
+  	font-size: 120%;
+  	text-decoration: none;
+  	background-color: black;
+  	color: white;
+  	padding: 2px 6px 2px 6px;
+    position: fixed; 
+    bottom: 0;
+	}
+        
+table {
+    font-family: arial, sans-serif;
+    border-collapse: collapse;
+    width: 100%;
+}
+
+td {
+    border: 1px solid #aaaaaa;
+    text-align: left;
+    padding: 8px;
+}
+tr:nth-child(even) {
+    background-color: #dddddd;
+}
+th{
+    border: 2px solid #aaaaaa;
+    text-align: center;
+    padding: 12px;
+    font-weight: bold;	
+}
+.cur{
+	font: bold 10px Arial;
+	float: right;
+}
+.graphs{
+	font: bold 11px Arial;
+    float:right
+}
+	</style>
+</head>
+	<body>
+
+	<center><h1>P/L</h1></center>
+
+		{{table | safe}}
+	<br><br>
+	<div class = 'cur'>Currency: {{currency | safe}}</div>
+    <br><br>
+    	  <div id = 'graph_div' class = 'graphs'>
+          <fieldset>
+          <legend>Graph Your P/L</legend>
+          	<center><h2>Individual Currencies</h2></center>
+            <p>Enter Ticker:</p><br>
+                <input type = 'text' id = 'ticker' list = 'ticker_list'><br><br>
+            <datalist id = 'ticker_list'>
+            {% for ticker in ticker_list %}
+              {{ticker | safe}}
+            {% endfor %}
+            </datalist>
+
+            <button type = 'button' id = 'vwap' onclick = 'return loadVWAP()'>VWAP History</button>
+            <button type = 'button' id = 'price' onclick = 'return loadPrice()'>Price History</button>
+
+            <center><h2>Portfolio Summaries</h2></center>
+            
+            <button type = 'button' id = 'cash' onclick = 'return loadCash()'>Cash History</button>
+            <button type = 'button' id = 'tp' onclick = 'return loadTPL()'>Portfolio PL</button>
+            </fieldset>
+          </div>
+	<a href = '/'>Home</a>
+	</body>
+	
+</html>

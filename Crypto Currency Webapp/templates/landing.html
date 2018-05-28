@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script>
+   function changeBase()
+    {
+        var req = new XMLHttpRequest()
+        req.onreadystatechange = function()
+        {
+            if (req.readyState == 4)
+            {
+                if (req.status != 200)
+                {
+                    //error handling code here
+                }
+                else
+			 document.getElementById('cur_result').innerHTML = 'Currency Changed'
+                {
+                    
+                }
+            }
+        }
+
+        req.open('GET', '/?currency=BTC', true);
+	req.send()
+    }
+
+
+</script>
+<style>
+table {
+    font-family: arial, sans-serif;
+    border-collapse: collapse;
+    width: 100%;
+}
+
+td {
+    border: 1px solid #dddddd;
+    text-align: left;
+    padding: 8px;
+}
+
+tr:nth-child(odd) {
+    background-color: #dddddd;
+}
+fieldset{
+	width: 800px;
+    
+}
+title{
+	font-size: 300%;
+}
+a {
+  font: bold 11px Arial;
+  font-size: 120%;
+  text-decoration: none;
+  background-color: black;
+  color: white;
+  padding: 2px 6px 2px 6px;
+}
+.user_options{
+	text-align:right;
+	font: bold 11px Arial;
+    	float: right;
+	bottom: 0;
+}
+
+</style>
+</head>
+<body>
+  <i><center><h1 class = 'title'>Crypto Trader</h1></center></i>
+  <center>
+  <img src = 'https://cdn-images-1.medium.com/max/1200/1*TY0eUcLT6us5Jz1VT1Tymg.jpeg' width="200" height="100"><br><br>
+  <fieldset class = 'container'>
+  	<legend>Main Menu</legend>
+  	  <table class = 'links'>
+      <tr> 
+      	<td><li><a href= "trade">Trade</a></td></li></td> 
+        <td><p>Lookup pricing data, charts, and trade currencies</p></td>
+       </tr>
+      <tr>
+      	<td><li><a href= "blotter">Blotter</a></td></li>
+        <td><p>View your trading and cashflow history</p></td>
+      </tr>
+      <tr>
+      	<td><li><a href= "pl">P/L</a></td></li>
+        <td><p>Show gains, losses, and other information about your portfolio</p></td>
+      </tr>
+      </table>
+  </fieldset>
+  </center>
+  	 <div class = 'user_options'>
+  	<fieldset style = 'width:200px'>
+      <legend>User Options</legend>
+
+      Choose PL/Blotter Display Currency:<br><br>
+      <form>
+      <input type = 'radio' name = 'cur' value = 'USDT'>USD<br>
+      <input type = 'radio' name = 'cur' value = 'BTC'>BTC<br>
+      <input type = 'radio' name = 'cur' value = 'ETH'>ETH<br>
+      <input type = 'radio' name = 'cur' value = 'LTC'>LTC<br><br>
+      <button type = 'submit' name = 'cur_button' action = '/'>Change Currency</button><br>
+      </form>
+      <br><br>
+      Start Over?<br><br>
+      <form>
+       <input type="checkbox" name="wipe" value="yes">Yes<br>
+      <button type = 'submit' name = 'wipe_button' action = '/'>Wipe Account</button>
+      </form>
+    </fieldset>
+      </div>	
+
+
+</body>
+</html>

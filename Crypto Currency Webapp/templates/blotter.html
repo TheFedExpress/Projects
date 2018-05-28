@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+table {
+    font-family: arial, sans-serif;
+    border-collapse: collapse;
+    width: 100%;
+}
+
+td {
+    border: 1px solid #aaaaaa;
+    text-align: left;
+    padding: 8px;
+}
+
+tr:nth-child(even) {
+    background-color: #dddddd;
+}
+th{
+    border: 2px solid #aaaaaa;
+    text-align: center;
+    padding: 12px;
+    font-weight: bold;	
+}
+title{
+	font-size: 300%;
+}
+a {
+  font: bold 11px Arial;
+  font-size: 120%;
+  text-decoration: none;
+  background-color: black;
+  color: white;
+  padding: 2px 6px 2px 6px;
+}
+.cur{
+	font: bold 10px Arial;
+	float: right;
+}
+</style>
+</head>
+<body>
+	<center><h1>Blotter</h1></center>
+		<center>{{table | safe}}</center>
+	<br><br>
+	<div class = 'cur'>Currency: {{currency | safe}}</div>
+	<a href = '/'>Home</a>
+</body>
+</html>

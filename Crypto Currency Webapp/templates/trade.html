@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="https://d14fo0winaifog.cloudfront.net/plotly-basic.js"></script>
+<script>
+ 
+    function loadPrice()
+    {
+        var req = new XMLHttpRequest()
+        req.onreadystatechange = function()
+        {
+            if (req.readyState == 4)
+            {
+                if (req.status == 200){
+                    var response = JSON.parse(req.responseText)
+                    document.getElementById('mean').innerHTML = response.mean
+		    document.getElementById('min').innerHTML = response.min
+		    document.getElementById('max').innerHTML = response.max
+		    document.getElementById('stdev').innerHTML = response.stdev
+                }
+            }
+	}
+    
+        req.open('POST', '/stats')
+        req.setRequestHeader("Content-type", "application/x-www-form-urlencoded")
+        var tick = document.getElementById('ticker').value
+        var postVars = 'ticker='+tick
+        req.send(postVars)
+        
+        return false
+    }
+
+    function loadGraph()
+    {
+	var tick = document.getElementById('ticker').value
+        window.open('graph?ticker=' + tick, '_blank')
+    }
+
+    function loadPreview()
+    {
+        var req = new XMLHttpRequest()
+        req.onreadystatechange = function()
+        {
+            if (req.readyState == 4)
+            {
+                if (req.status == 200)
+                {
+                    var response = JSON.parse(req.responseText)
+                    document.getElementById('current').innerHTML = response.current
+		    document.getElementById('total').innerHTML = response.total
+		    if (response.total != ''){
+		    	document.getElementById('tradebutton').disabled = false
+		    }
+                }
+            }
+        }
+    
+        req.open('POST', '/preview')
+        req.setRequestHeader("Content-type", "application/x-www-form-urlencoded")
+        var tick = document.getElementById('ticker').value
+	var type = document.querySelector('input[name = "tran_type"]:checked').value
+	var shares = document.getElementById('shares').value
+        var postVars = 'ticker=' + tick + '&shares=' + shares + '&type=' + type
+        req.send(postVars)
+        
+        return false
+    }
+
+
+    function makeTrade()
+    {
+        var req = new XMLHttpRequest()
+        req.onreadystatechange = function()
+        {
+            if (req.readyState == 4)
+            {
+                if (req.status == 200)
+                {
+                    var response = JSON.parse(req.responseText)
+                    document.getElementById('result').innerHTML = response.message
+		    document.getElementById('tradebutton').disabled = true
+		    var items = ['shares', 'ticker', 'current', 'total', 'min', 'mean', 'max', 'stdev']
+		    for (var i = 0; i < 8; i++){
+			if (i < 2){
+		    		document.getElementById(items[i]).value = ''
+			}
+			else{
+				document.getElementById(items[i]).innerHTML = ''
+			}
+		    }
+
+                }
+            }
+        }
+    
+        req.open('POST', '/execute')
+        req.setRequestHeader("Content-type", "application/x-www-form-urlencoded")
+        var tick = document.getElementById('ticker').value
+	var type= document.querySelector('input[name = "tran_type"]:checked').value
+	var shares = document.getElementById('shares').value
+        var postVars = 'ticker=' + tick + '&shares=' + shares + '&type=' + type
+        req.send(postVars)
+        
+        return false
+    }
+
+
+      function optimizeSelection()
+    {
+        var req = new XMLHttpRequest()
+        req.onreadystatechange = function()
+        {
+            if (req.readyState == 4)
+            {
+                if (req.status == 200){
+                    var response = req.responseText
+                    document.getElementById('allocations').innerHTML = response
+                }
+            }
+	}
+    
+    	var inputs = document.getElementsByName("optimize")
+	var checked_tickers = []
+	for(var i = 0; i < inputs.length; i++) {
+    		if(inputs[i].checked == true) {
+        		checked_tickers.push(inputs[i].value)
+   		}  
+	}
+	req.open('POST', '/optimize')
+        req.setRequestHeader("Content-type", "application/x-www-form-urlencoded")
+        var postVars = 'tickers=' + checked_tickers
+        req.send(postVars)
+        
+        return false
+    }
+
+</script>
+
+<style>
+div{
+	font-family: arial, sans-serif;
+}
+
+
+.container{
+	width:625px;
+}
+.options{
+	float:left;
+	width:300px;
+}
+.stats{
+	width:290px;
+    float:left;
+}
+.optimize{
+	float:right
+}
+
+table {
+    font-family: arial, sans-serif;
+    border-collapse: collapse;
+    width: 100%;
+}
+
+td {
+    border: 1px solid #aaaaaa;
+    text-align: left;
+    padding: 8px;
+}
+tr:nth-child(even) {
+    background-color: #dddddd;
+}
+th{
+    border: 2px solid #aaaaaa;
+    text-align: center;
+    padding: 12px;
+    font-weight: bold;	
+}
+
+a {
+  font: bold 11px Arial;
+  font-size: 120%;
+  text-decoration: none;
+  background-color: black;
+  color: white;
+  padding: 2px 6px 2px 6px;
+}
+
+</style>
+
+    
+</head>
+
+<body>
+<center><h1>Trading Menu<h1></center>
+<div class = "container">
+  <div class = "options">
+      <fieldset>
+          <legend>Trade Options</legend>
+          <p>Enter Ticker:</p><br>
+              <input type = 'text' id = 'ticker' list = 'ticker_list'><br><br>
+	      <datalist id = 'ticker_list'>
+	      {% for ticker in ticker_list %}
+			{{ticker | safe}}
+	      {% endfor %}
+	      </datalist>
+              <button type = 'button' id = 'chart' onclick = 'return loadGraph()'>Show Chart</button>  
+	       <button type = 'button' id = 'stats' onclick = 'return loadPrice()'>Show Stats</button><br><br>
+              <b>Choose Trade Type:</b><br><br>
+              <input type = 'radio' name = 'tran_type' value = 'buy'>Buy<br>
+              <input type = 'radio' name = 'tran_type' value = 'sell'>Sell<br>
+              <input type = 'radio' name = 'tran_type' value = 'short'>Short Sell<br>
+              <input type = 'radio' name = 'tran_type' value = 'cover'>Short Cover<br><br>
+              <b>Enter Quantity:</b><br><br>
+              <input type = 'text' id = 'shares'><br><br>
+              <button type = 'submit' name = 'preview' onclick = "return loadPreview()">Preview Trade</button>
+      </fieldset>
+  </div>
+</div>
+  <div class = 'stats'>
+  <fieldset>
+  	<legend>Price Statistics(Last 24 Hours)</legend>
+    <b>Mean: <span id = 'mean'></span></b><br>
+    <b>Min: <span id = 'min'></span></b><br>
+    <b>Max: <span id = 'max'></span></b><br>
+    <b>Stdev: <span id = 'stdev'></span></b><br>
+</div>
+
+<div class = 'optimize'>
+	<fieldset style = 'width:300px'>
+		<legend>Optimize</legend>
+		<h3>Find an Optimal Allocation</h3><br><br>
+		{% for item in opt_list %}
+			{{item | safe}}
+		{% endfor %}
+		<br>
+		<button name = 'opt_button' onclick = "return optimizeSelection()">Show Allocation</button><br>
+	</fieldset>
+	<br>
+	<br>
+	<div id = 'allocations'>
+	</div>
+</div>
+
+<br>
+<br>
+<br>
+<div class = 'finalize' style = "width:300px">
+	<fieldset>
+            <legend>Finalize Trade</legend>
+        <b>Current Price:</b> <span id = 'current'> </span><br>
+        <b>Total Order Value:</b> <span id = 'total'> </span><br><br>
+        <button type = 'submit' name = 'maketrade' id = 'tradebutton' onclick = "return makeTrade()" disabled>Make Trade</button><br>
+	<span id = 'result'></span>
+    </fieldset>
+</div><br><br>
+<a href = '/'>Home</a>
+</body>
+</html>
